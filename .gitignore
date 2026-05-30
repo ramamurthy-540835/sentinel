@@ -9,3 +9,5 @@ __pycache__/
 .aider*
 prompt_v6_*
 generated_code_output.md
+reports/
+*.log
