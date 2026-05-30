@@ -1,0 +1,62 @@
+{
+  "default_model": "gemini-flash",
+  "models": {
+    "grok-fast": {
+      "display_name": "Grok 4.20 Non-Reasoning (Vertex AI)",
+      "api_model_id": "vertex_ai/grok-4.20-non-reasoning",
+      "provider": "vertex_native",
+      "region": "us-central1",
+      "use_case": "fast coding, SQL, shell, refactor",
+      "aider_supported": true,
+      "recommended": true
+    },
+    "grok-reasoning": {
+      "display_name": "Grok 4.20 Reasoning (Vertex AI)",
+      "api_model_id": "vertex_ai/grok-4.20-reasoning",
+      "provider": "vertex_native",
+      "region": "us-central1",
+      "use_case": "architecture, debugging, deep reasoning",
+      "aider_supported": true
+    },
+    "grok-lite": {
+      "display_name": "Grok 4.1 Fast Non-Reasoning (Vertex AI)",
+      "api_model_id": "vertex_ai/grok-4.1-fast-non-reasoning",
+      "provider": "vertex_native",
+      "region": "us-central1",
+      "use_case": "ultra low latency",
+      "aider_supported": false
+    },
+    "gemini-flash": {
+      "display_name": "Gemini 3.5 Flash",
+      "api_model_id": "vertex_ai/gemini-3.5-flash",
+      "provider": "vertex_native",
+      "region": "us-central1",
+      "use_case": "large context, repo refactor, production coding",
+      "aider_supported": true
+    },
+    "gemini-pro": {
+      "display_name": "Gemini 3.5 Pro (Reserved)",
+      "api_model_id": "vertex_ai/gemini-3.5-pro",
+      "provider": "vertex_native",
+      "region": "global",
+      "use_case": "advanced architecture review (future)",
+      "aider_supported": true
+    },
+    "claude-sonnet": {
+      "display_name": "Claude Sonnet 4.6 (Vertex AI)",
+      "api_model_id": "vertex_ai/claude-sonnet-4-6",
+      "provider": "vertex_native",
+      "region": "us-central1",
+      "use_case": "highly accurate coding and structural design",
+      "aider_supported": true
+    },
+    "claude-opus": {
+      "display_name": "Claude Opus 4.7 (Vertex AI)",
+      "api_model_id": "vertex_ai/claude-opus-4-7",
+      "provider": "vertex_native",
+      "region": "us-central1",
+      "use_case": "complex agentic workflows and cross-cloud layouts",
+      "aider_supported": true
+    }
+  }
+}

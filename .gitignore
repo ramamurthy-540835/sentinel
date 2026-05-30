@@ -1,0 +1,11 @@
+venv/
+.venv/
+logs/
+saved_prompts/
+generated_code/
+backups/
+*.pyc
+__pycache__/
+.aider*
+prompt_v6_*
+generated_code_output.md
