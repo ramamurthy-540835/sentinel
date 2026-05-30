@@ -1,9 +1,0 @@
-[
-  {
-    "requirement_id": "REQ-003",
-    "description": "Requirement extracted from system_requirements.md",
-    "source_file": "requirements/system_requirements.md",
-    "evidence": [],
-    "status": "Missing"
-  }
-]

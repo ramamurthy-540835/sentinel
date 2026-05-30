@@ -6,6 +6,7 @@ set -euo pipefail
 
 WRITE_BQ=false
 TARGET_PROJECT=""
+PROMPT_ID=""
 
 # Parse arguments (target first, then optional flags)
 while [[ $# -gt 0 ]]; do
@@ -13,6 +14,10 @@ while [[ $# -gt 0 ]]; do
         --write-bq)
             WRITE_BQ=true
             shift
+            ;;
+        --prompt-id)
+            PROMPT_ID="$2"
+            shift 2
             ;;
         -*)
             echo "Unknown option: $1" >&2
@@ -35,6 +40,9 @@ TARGET_PROJECT=${TARGET_PROJECT:-/home/appadmin/projects/Ram_Projects/DiracDelta
 echo "================================================================================"
 echo "PRISM Sentinel Quality Agent - Full Audit Execution"
 echo "Target Project: $TARGET_PROJECT"
+if [[ -n "$PROMPT_ID" ]]; then
+    echo "Original Prompt ID: $PROMPT_ID"
+fi
 if $WRITE_BQ; then
     echo "BigQuery Sync: ENABLED (ctoteam.prism_sentinel_audit)"
 fi
@@ -78,7 +86,7 @@ echo "6. Packaging Audit Evidence..."
 if $WRITE_BQ; then
     echo ""
     echo "7. Writing audit results to BigQuery..."
-    ./scripts/write_audit_to_bigquery.sh "$TARGET_PROJECT" "$AUDIT_RUN_ID"
+    ./scripts/write_audit_to_bigquery.sh "$TARGET_PROJECT" "$AUDIT_RUN_ID" "$PROMPT_ID"
 fi
 
 echo ""
@@ -86,6 +94,9 @@ echo "==========================================================================
 if $WRITE_BQ; then
     echo "PRISM Sentinel Audit Complete + BigQuery sync attempted."
     echo "  Run ID: $AUDIT_RUN_ID"
+    if [[ -n "$PROMPT_ID" ]]; then
+        echo "  Prompt ID: $PROMPT_ID"
+    fi
     echo "  Query:  bq query --use_legacy_sql=false \"SELECT * FROM \\\`ctoteam.prism_sentinel_audit.audit_runs\\\` WHERE audit_run_id='${AUDIT_RUN_ID}'\""
 else
     echo "PRISM Sentinel Audit Complete! All reports generated under reports/"

@@ -27,6 +27,7 @@ def parse_args():
     parser.add_argument('--audit-run-id', required=True, help='UUID for this audit run')
     parser.add_argument('--gcs-base-uri', required=True, help='GCS URI base, e.g. gs://agentproject/sentinel-audits/myproject/<run_id>/')
     parser.add_argument('--reports-dir', default='reports', help='Local reports directory')
+    parser.add_argument('--prompt-id', default='', help='Original Saved Prompt ID this target was built from (optional)')
     return parser.parse_args()
 
 
@@ -274,6 +275,7 @@ def main():
         "audit_run_id": audit_run_id,
         "target_project_path": str(target_path),
         "target_project_name": target_name,
+        "prompt_id": args.prompt_id or None,
         "overall_score": overall_score,
         "overall_status": overall_status,
         "started_at": started.isoformat(),
