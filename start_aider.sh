@@ -100,7 +100,14 @@ PROMPT_ARG="${2:-}"
 # Check if $PROMPT_ARG is passed and ends with .md or .py (is a prompt file)
 if [ -n "$PROMPT_ARG" ]; then
   if [[ "$PROMPT_ARG" == *.md ]] || [[ "$PROMPT_ARG" == *.py ]]; then
-    exec aider --model "$MODEL_NAME" --no-auto-commits "$PROMPT_ARG"
+    # Special case for long "build spec" prompt files: feed content as --message
+    # so Aider executes the instructions instead of just opening the file for editing.
+    if grep -qE '^(Goal:|Primary Inputs:|Create agents:|Acceptance:)' "$PROMPT_ARG" 2>/dev/null; then
+      echo -e "${YELLOW}→ Detected build spec prompt. Sending content as initial message (not opening file).${NC}"
+      exec aider --model "$MODEL_NAME" --no-auto-commits --message "$(cat "$PROMPT_ARG")"
+    else
+      exec aider --model "$MODEL_NAME" --no-auto-commits "$PROMPT_ARG"
+    fi
   else
     exec aider --model "$MODEL_NAME" --no-auto-commits --message "$PROMPT_ARG"
   fi
