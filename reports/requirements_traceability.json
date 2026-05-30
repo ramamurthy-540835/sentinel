@@ -1,62 +1,9 @@
 [
   {
-    "requirement_id": "REQ-002",
-    "description": "Requirement extracted from system_requirements.md",
-    "source_file": "requirements/system_requirements.md",
-    "evidence": [
-      {
-        "file": ".aider.chat.history.md",
-        "type": "doc_reference"
-      },
-      {
-        "file": "agents/requirement_mapper.py",
-        "type": "code_reference"
-      },
-      {
-        "file": "requirements/system_requirements.md",
-        "type": "doc_reference"
-      }
-    ],
-    "status": "Implemented"
-  },
-  {
-    "requirement_id": "REQ-001",
-    "description": "Requirement extracted from system_requirements.md",
-    "source_file": "requirements/system_requirements.md",
-    "evidence": [
-      {
-        "file": ".aider.chat.history.md",
-        "type": "doc_reference"
-      },
-      {
-        "file": "agents/requirement_mapper.py",
-        "type": "code_reference"
-      },
-      {
-        "file": "requirements/system_requirements.md",
-        "type": "doc_reference"
-      }
-    ],
-    "status": "Implemented"
-  },
-  {
     "requirement_id": "REQ-003",
     "description": "Requirement extracted from system_requirements.md",
     "source_file": "requirements/system_requirements.md",
-    "evidence": [
-      {
-        "file": ".aider.chat.history.md",
-        "type": "doc_reference"
-      },
-      {
-        "file": "agents/requirement_mapper.py",
-        "type": "code_reference"
-      },
-      {
-        "file": "requirements/system_requirements.md",
-        "type": "doc_reference"
-      }
-    ],
-    "status": "Implemented"
+    "evidence": [],
+    "status": "Missing"
   }
 ]

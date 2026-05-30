@@ -26,7 +26,7 @@ echo "5. Running GCS Audit..."
 ./scripts/run_gcs_audit.sh "$TARGET_PROJECT"
 
 echo "6. Packaging Audit Evidence..."
-./scripts/run_audit_package.sh
+./scripts/run_audit_package.sh "$TARGET_PROJECT"
 
 echo "================================================================================"
 echo "PRISM Sentinel Audit Complete! All reports generated under reports/"

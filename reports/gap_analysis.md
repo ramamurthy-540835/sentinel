@@ -7,4 +7,4 @@ Analyzed target project structure and compared it against extracted requirements
 
 | Category | Severity | Description | Recommendation | Owner Hint |
 | --- | --- | --- | --- | --- |
-| Missing Tests | 🟠 MAJOR | No Python test files (test_*.py or *_test.py) were found in the target project. | Create a test suite under tests/ directory to verify core functionality. | QA Engineer |
+| Missing Implementation | 🔴 CRITICAL | Requirement REQ-003 has no mapped implementation evidence in the target project. | Implement logic for REQ-003 and reference the ID in code comments. | Lead Developer |
