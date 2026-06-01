@@ -25,7 +25,7 @@ def main():
         target_project = parse_args()
         print(f"PRISM Sentinel Code Quality Reviewer starting on target: {target_project}")
         
-        reports_dir = Path("reports")
+        reports_dir = Path(os.environ.get("SENTINEL_REPORTS_DIR", "reports"))
         reports_dir.mkdir(exist_ok=True)
         
         findings = []
@@ -66,8 +66,7 @@ def main():
             else:
                 passed_checks += 1
 
-        # 3. SQL Scan & Forbidden Model Scan & Secret Scan
-        forbidden_models = ["gemini-1.5", "gemini-2.0", "gemini-2.5"]
+        # 3. SQL Scan & Secret Scan
         secret_patterns = ["AI_PROVIDER", "GITHUB_TOKEN", "PASSWORD", "SECRET_KEY", "PRIVATE_KEY"]
         
         for root, _, files in os.walk(target_project):
@@ -89,21 +88,6 @@ def main():
                                     "description": "Use of 'SELECT *' detected. Explicit column selection is preferred.",
                                     "recommendation": "Replace 'SELECT *' with explicit column names.",
                                     "owner_hint": "Data Engineer"
-                                })
-                            else:
-                                passed_checks += 1
-                                
-                        # Forbidden Model Scan
-                        for model in forbidden_models:
-                            total_checks += 1
-                            if model in content:
-                                findings.append({
-                                    "category": "Forbidden Model Policy",
-                                    "severity": "critical",
-                                    "file": str(rel_path),
-                                    "description": f"Forbidden model '{model}' referenced in file.",
-                                    "recommendation": "Migrate to allowed models: gemini-3.5-flash, grok-4.2-reasoning, or grok-4.2-non-reasoning.",
-                                    "owner_hint": "Architect"
                                 })
                             else:
                                 passed_checks += 1
@@ -141,7 +125,7 @@ def main():
         with open(md_report_path, "w") as f:
             f.write("# PRISM Sentinel - Code Quality Report\n\n")
             f.write("## Execution Plan & Reasoning Summary\n")
-            f.write("Performed static analysis checks including Python compilation, Bash syntax validation, SQL best practices, forbidden model policy compliance, and hardcoded secret scanning.\n\n")
+            f.write("Performed static analysis checks including Python compilation, Bash syntax validation, SQL best practices, and hardcoded secret scanning.\n\n")
             f.write(f"### Quality Score: {score}/100\n")
             f.write(f"Passed {passed_checks} out of {total_checks} checks.\n\n")
             

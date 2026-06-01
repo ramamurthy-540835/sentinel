@@ -19,7 +19,7 @@ def main():
         target_project = parse_args()
         print("PRISM Sentinel Audit Packager starting...")
         
-        reports_dir = Path("reports")
+        reports_dir = Path(os.environ.get("SENTINEL_REPORTS_DIR", "reports"))
         reports_dir.mkdir(exist_ok=True)
         
         package_path = reports_dir / "audit_evidence_package.md"

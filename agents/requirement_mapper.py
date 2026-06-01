@@ -24,7 +24,7 @@ def main():
         print(f"PRISM Sentinel Requirement Mapper starting on target: {target_project}")
         
         # Ensure reports directory exists
-        reports_dir = Path("reports")
+        reports_dir = Path(os.environ.get("SENTINEL_REPORTS_DIR", "reports"))
         reports_dir.mkdir(exist_ok=True)
         
         # Read requirements from requirements/ directory

@@ -22,7 +22,7 @@ def main():
         target_project = parse_args()
         print(f"PRISM Sentinel GCS Auditor starting on target: {target_project}")
         
-        reports_dir = Path("reports")
+        reports_dir = Path(os.environ.get("SENTINEL_REPORTS_DIR", "reports"))
         reports_dir.mkdir(exist_ok=True)
         
         findings = []

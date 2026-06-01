@@ -327,6 +327,31 @@ def main():
     print(f"BigQuery audit writer finished. Overall status: {overall_status}")
     print(f"Reports available at: {gcs_base}")
 
+    # Record consumption for budget tracking (new requirement)
+    if args.prompt_id:
+        try:
+            token_est = load_json_safe(reports_dir / "scientific_estimation.json").get("token_estimate", {})
+            fp = load_json_safe(reports_dir / "scientific_estimation.json").get("functional_points", {})
+
+            consumption_row = {
+                "consumption_id": str(uuid.uuid4()),
+                "prompt_id": args.prompt_id,
+                "audit_run_id": audit_run_id,
+                "tokens_in": token_est.get("total_estimated_input_tokens"),
+                "tokens_out": token_est.get("total_estimated_output_tokens"),
+                "estimated_cost_usd": token_est.get("estimated_total_cost_usd"),
+                "functional_points": fp.get("total_functional_points"),
+                "complexity_band": fp.get("complexity_band"),
+                "run_type": "full_audit" if WRITE_BQ else "estimation",  # rough
+                "source": "local",
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            write_ndjson([consumption_row], tmp_dir / "prompt_consumption.ndjson")
+            load_to_bigquery("prompt_consumption", tmp_dir / "prompt_consumption.ndjson")
+            print("Consumption record written for budget tracking.")
+        except Exception as e:
+            print(f"Warning: Could not record consumption: {e}")
+
     # Always succeed from Sentinel's perspective (local reports exist)
     # Only exit non-zero for unrecoverable Python errors (already handled by try/except in caller)
     sys.exit(0)

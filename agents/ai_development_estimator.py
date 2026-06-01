@@ -41,6 +41,28 @@ GEMINI_35_FLASH_INPUT_PRICE_USD_PER_M = 0.15   # $0.15 / 1M input tokens
 GEMINI_35_FLASH_OUTPUT_PRICE_USD_PER_M = 0.60  # $0.60 / 1M output tokens
 MODEL_NAME = "gemini-3.5-flash"
 
+# Alternative strong models (approximate 2026 public pricing)
+ALTERNATIVE_MODELS_PRICING = {
+    "xai_grok_4_reasoning": {
+        "name": "xAI Grok 4 Reasoning",
+        "input_usd_per_m": 3.00,
+        "output_usd_per_m": 15.00,
+        "notes": "Strong at complex reasoning and structured output"
+    },
+    "openai_o3": {
+        "name": "OpenAI o3",
+        "input_usd_per_m": 15.00,
+        "output_usd_per_m": 60.00,
+        "notes": "Highest reasoning quality, expensive at scale"
+    },
+    "claude_4_opus": {
+        "name": "Claude 4 Opus",
+        "input_usd_per_m": 15.00,
+        "output_usd_per_m": 75.00,
+        "notes": "Excellent at long-context and architecture work"
+    }
+}
+
 # =============================================================================
 # FUNCTIONAL POINT WEIGHTS (IFPUG-inspired, adapted for AI agent work)
 # =============================================================================
@@ -106,12 +128,18 @@ class EstimationResult:
     model: str = MODEL_NAME
     generated_at: str = ""
     source_provenance: str = ""
+    source_type: str = ""  # bq_official|bq_bqml_cleaned|local_cleaned_*|gcs_raw|local_raw
+    source_quality_score: float = 0.0  # 0.0 - 1.0 confidence in source quality
     requirements: List[Dict[str, Any]] = field(default_factory=list)
     functional_points: Dict[str, Any] = field(default_factory=dict)
     token_estimate: Dict[str, Any] = field(default_factory=dict)
     optimization_plan: Dict[str, Any] = field(default_factory=dict)
     validation: Dict[str, Any] = field(default_factory=dict)
     raw_prompt_excerpt: str = ""   # first 2000 chars for auditability
+
+    # New: User & Budget context for cost allocation
+    num_users: int = 1
+    monthly_budget_usd: float = 0.0
 
 
 def run_command(cmd: List[str], timeout: int = 60) -> Tuple[int, str, str]:
@@ -135,35 +163,50 @@ def run_command(cmd: List[str], timeout: int = 60) -> Tuple[int, str, str]:
 # STEP 1: AUTHORITATIVE REQUIREMENTS LOADER
 # =============================================================================
 
-def load_authoritative_content(prompt_id: str) -> Tuple[str, str]:
+def load_authoritative_content(prompt_id: str) -> Tuple[str, str, dict]:
     """
-    Priority order (exactly as specified):
-      1. BigQuery ctoteam.prompt_registry.prompt_baselines (is_current=TRUE)
-      2. GCS gs://agentproject/saved-prompts/{prompt_id}/.../final_assembled.md
-      3. Local files (requirement_scope_clean.md preferred, then coder saved_prompts)
+    Priority order (REVISED - prefer cleaned scope over raw prompt):
+      1. BigQuery ctoteam.prompt_registry.prompt_baselines (future truth)
+      2. BigQuery ctoteam.prism_requirement_intelligence.functional_scope (BQML-cleaned)
+      3. Local requirement_scope_clean.md (BQML-cleaned, fast path)
+      4. GCS gs://agentproject/saved-prompts/{prompt_id}/.../final_assembled.md (raw, noisy)
+      5. Local coder saved_prompts (fallback)
 
-    Returns (content, provenance_string)
+    Returns (content, provenance_string, metadata)
+    metadata = {source_type, source_quality_score, requirement_count}
     Never raises for missing sources — always falls back with clear logging.
     """
-    print("STEP 1: Loading authoritative prompt content...")
+    print("STEP 1: Loading authoritative prompt content (cleaned scope first)...")
 
     # --- Priority 1: BigQuery prompt_registry (the intended future source of truth)
-    bq_content, bq_prov = _try_bigquery_prompt_registry(prompt_id)
+    bq_content, bq_prov, meta = _try_bigquery_prompt_registry(prompt_id)
     if bq_content:
-        print(f"  ✓ Loaded from BigQuery prompt_registry ({len(bq_content)} chars)")
-        return bq_content, bq_prov
+        print(f"  ✓ Loaded from BigQuery prompt_registry ({len(bq_content)} chars) [QUALITY: official]")
+        return bq_content, bq_prov, meta
 
-    # --- Priority 2: GCS silver/gold final_assembled.md (current authoritative)
-    gcs_content, gcs_prov = _try_gcs_final_assembled(prompt_id)
+    # --- Priority 2: BigQuery functional_scope (BQML-cleaned requirements)
+    bqml_content, bqml_prov, meta = _try_bigquery_functional_scope(prompt_id)
+    if bqml_content:
+        print(f"  ✓ Loaded from BigQuery functional_scope ({len(bqml_content)} chars) [QUALITY: cleaned]")
+        return bqml_content, bqml_prov, meta
+
+    # --- Priority 3: Local BQML-cleaned scope (fast path, pre-computed)
+    local_clean_content, local_clean_prov, meta = _try_local_cleaned_scope(prompt_id)
+    if local_clean_content:
+        print(f"  ✓ Loaded from local requirement_scope_clean.md ({len(local_clean_content)} chars) [QUALITY: cleaned]")
+        return local_clean_content, local_clean_prov, meta
+
+    # --- Priority 4: GCS silver/gold final_assembled.md (raw, noisy - use only if cleaned unavailable)
+    gcs_content, gcs_prov, meta = _try_gcs_final_assembled(prompt_id)
     if gcs_content:
-        print(f"  ✓ Loaded from GCS ({len(gcs_content)} chars) - {gcs_prov}")
-        return gcs_content, gcs_prov
+        print(f"  ⚠ Loaded from GCS ({len(gcs_content)} chars) [QUALITY: raw] - {gcs_prov}")
+        return gcs_content, gcs_prov, meta
 
-    # --- Priority 3: Local fallbacks
-    local_content, local_prov = _try_local_sources(prompt_id)
+    # --- Priority 5: Local fallbacks (raw coder saved prompts)
+    local_content, local_prov, meta = _try_local_sources(prompt_id)
     if local_content:
-        print(f"  ✓ Loaded from local ({len(local_content)} chars) - {local_prov}")
-        return local_content, local_prov
+        print(f"  ⚠ Loaded from local raw prompt ({len(local_content)} chars) [QUALITY: raw] - {local_prov}")
+        return local_content, local_prov, meta
 
     raise RuntimeError(
         f"CRITICAL: No usable prompt content found for {prompt_id} "
@@ -171,9 +214,8 @@ def load_authoritative_content(prompt_id: str) -> Tuple[str, str]:
     )
 
 
-def _try_bigquery_prompt_registry(prompt_id: str) -> Tuple[Optional[str], str]:
+def _try_bigquery_prompt_registry(prompt_id: str) -> Tuple[Optional[str], str, dict]:
     """Attempt to read from the official prompt_registry table."""
-    # We use bq CLI (always available in this environment) for maximum robustness.
     query = f"""
         SELECT prompt_text, functional_points, requirement_count, version_number
         FROM `ctoteam.prompt_registry.prompt_baselines`
@@ -187,7 +229,7 @@ def _try_bigquery_prompt_registry(prompt_id: str) -> Tuple[Optional[str], str]:
     ]
     code, out, err = run_command(cmd, timeout=45)
     if code != 0:
-        return None, f"bq_error: {err.strip()[:200]}"
+        return None, f"bq_error: {err.strip()[:200]}", {}
 
     try:
         rows = json.loads(out)
@@ -196,13 +238,104 @@ def _try_bigquery_prompt_registry(prompt_id: str) -> Tuple[Optional[str], str]:
             text = row.get("prompt_text") or row.get("content") or ""
             if text and len(text) > 500:
                 prov = f"bigquery:prompt_registry.prompt_baselines:v{row.get('version_number')}"
-                return text, prov
+                meta = {
+                    "source_type": "bq_official",
+                    "source_quality_score": 1.0,
+                    "requirement_count": row.get("requirement_count", 0)
+                }
+                return text, prov, meta
     except Exception as e:
-        return None, f"bq_parse_error: {e}"
-    return None, "bq_not_found_or_empty"
+        return None, f"bq_parse_error: {e}", {}
+    return None, "bq_not_found_or_empty", {}
 
 
-def _try_gcs_final_assembled(prompt_id: str) -> Tuple[Optional[str], str]:
+def _try_bigquery_functional_scope(prompt_id: str) -> Tuple[Optional[str], str, dict]:
+    """Attempt to read from BigQuery BQML-cleaned functional_scope table."""
+    query = f"""
+        SELECT
+          STRING_AGG(
+            CONCAT(
+              '[', requirement_category, '] ',
+              requirement_text, ' (FP:', CAST(functional_point_score AS STRING), ')'
+            ),
+            '\\n'
+          ) as cleaned_scope,
+          COUNT(*) as requirement_count,
+          SUM(CAST(functional_point_score AS FLOAT64)) as total_fp
+        FROM `ctoteam.prism_requirement_intelligence.functional_scope`
+        WHERE prompt_id = '{prompt_id}'
+        GROUP BY prompt_id
+    """
+    cmd = [
+        "bq", "query", "--project_id=ctoteam", "--use_legacy_sql=false",
+        "--format=json", "--quiet", query
+    ]
+    code, out, err = run_command(cmd, timeout=45)
+    if code != 0:
+        return None, f"bq_error: {err.strip()[:200]}", {}
+
+    try:
+        rows = json.loads(out)
+        if rows:
+            row = rows[0]
+            text = row.get("cleaned_scope", "")
+            if text and len(text) > 500:
+                prov = f"bigquery:functional_scope (BQML-cleaned) - {row.get('requirement_count')} reqs"
+                meta = {
+                    "source_type": "bq_bqml_cleaned",
+                    "source_quality_score": 0.95,  # 95% - cleaned but programmatic
+                    "requirement_count": int(row.get("requirement_count", 0)),
+                    "total_functional_points": float(row.get("total_fp", 0))
+                }
+                return text, prov, meta
+    except Exception as e:
+        return None, f"bq_parse_error: {e}", {}
+    return None, "bq_functional_scope_empty", {}
+
+
+def _try_local_cleaned_scope(prompt_id: str) -> Tuple[Optional[str], str, dict]:
+    """Attempt to read from local BQML-cleaned requirement_scope_clean files."""
+    base = Path(".")
+
+    # Try JSON first (has metadata)
+    json_path = base / f"reports/{prompt_id}/requirement_scope_clean.json"
+    if json_path.exists() and json_path.stat().st_size > 1000:
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                text = json.dumps(data, indent=2)
+                req_count = len(data.get("requirements", []))
+                total_fp = sum(
+                    r.get("functional_point_score", 0)
+                    for r in data.get("requirements", [])
+                )
+                meta = {
+                    "source_type": "local_cleaned_json",
+                    "source_quality_score": 0.95,
+                    "requirement_count": req_count,
+                    "total_functional_points": total_fp
+                }
+                return text, f"local:{json_path}", meta
+        except Exception as e:
+            print(f"  ⚠ Error reading cleaned JSON: {e}")
+
+    # Fall back to markdown
+    md_path = base / f"reports/{prompt_id}/requirement_scope_clean.md"
+    if md_path.exists() and md_path.stat().st_size > 2000:
+        text = md_path.read_text(encoding="utf-8")
+        # Try to extract req count from markdown
+        req_count = text.count("##") - 1  # Rough heuristic
+        meta = {
+            "source_type": "local_cleaned_md",
+            "source_quality_score": 0.90,
+            "requirement_count": max(1, req_count)
+        }
+        return text, f"local:{md_path}", meta
+
+    return None, "local_cleaned_not_found", {}
+
+
+def _try_gcs_final_assembled(prompt_id: str) -> Tuple[Optional[str], str, dict]:
     """Find the most recent high-quality final_assembled.md in silver/."""
     # List recent silver runs sorted by time
     list_cmd = [
@@ -211,7 +344,7 @@ def _try_gcs_final_assembled(prompt_id: str) -> Tuple[Optional[str], str]:
     ]
     code, out, _ = run_command(list_cmd, timeout=30)
     if code != 0 or not out.strip():
-        return None, "gcs_no_silver_runs"
+        return None, "gcs_no_silver_runs", {}
 
     # Parse gsutil -l output, pick the newest (last line before TOTAL)
     candidates = []
@@ -224,7 +357,7 @@ def _try_gcs_final_assembled(prompt_id: str) -> Tuple[Optional[str], str]:
                 candidates.append((ts, path))
 
     if not candidates:
-        return None, "gcs_no_candidates"
+        return None, "gcs_no_candidates", {}
 
     # Most recent by string timestamp works here (ISO-like)
     candidates.sort(reverse=True)
@@ -232,36 +365,46 @@ def _try_gcs_final_assembled(prompt_id: str) -> Tuple[Optional[str], str]:
 
     code, content, err = run_command(["gsutil", "cat", best_path], timeout=60)
     if code != 0 or len(content) < 1000:
-        return None, f"gcs_cat_failed: {err}"
+        return None, f"gcs_cat_failed: {err}", {}
 
-    return content, f"gcs:{best_path}"
+    meta = {
+        "source_type": "gcs_raw",
+        "source_quality_score": 0.70,  # 70% - raw, may contain noise
+        "requirement_count": 0  # Unknown for raw prompt
+    }
+    return content, f"gcs:{best_path}", meta
 
 
-def _try_local_sources(prompt_id: str) -> Tuple[Optional[str], str]:
-    """Local fallbacks in strict preference order."""
+def _try_local_sources(prompt_id: str) -> Tuple[Optional[str], str, dict]:
+    """Local fallbacks (raw coder saved prompts, since cleaned already tried)."""
     base = Path(".")
-
-    # 1. Clean scope produced by the BQML Requirement Intelligence layer (best local)
-    clean = base / f"reports/{prompt_id}/requirement_scope_clean.md"
-    if clean.exists() and clean.stat().st_size > 2000:
-        return clean.read_text(encoding="utf-8"), f"local:{clean}"
-
-    # 2. The coder's saved prompt directory (raw authoritative extraction)
     coder_saved = Path(f"../coder/saved_prompts/{prompt_id}")
+
+    # Try coder's saved prompt directory (raw extraction)
     for name in ["final_assembled.md", "assembled_requirements.md", "extracted_content.txt"]:
         p = coder_saved / name
         if p.exists() and p.stat().st_size > 3000:
-            return p.read_text(encoding="utf-8"), f"local:{p}"
+            text = p.read_text(encoding="utf-8")
+            meta = {
+                "source_type": "local_raw_coder",
+                "source_quality_score": 0.65,
+                "requirement_count": 0
+            }
+            return text, f"local:{p}", meta
 
-    # 3. Any previous scientific report (last resort)
+    # Last resort: previous scientific report (very rough)
     prev = base / f"reports/{prompt_id}/scientific_estimation.md"
     if prev.exists():
-        # Extract only the original prompt section if present (very rough)
         txt = prev.read_text(encoding="utf-8")
         if len(txt) > 2000:
-            return txt[:15000], f"local:previous_report:{prev}"
+            meta = {
+                "source_type": "local_previous_report",
+                "source_quality_score": 0.50,
+                "requirement_count": 0
+            }
+            return txt[:15000], f"local:previous_report:{prev}", meta
 
-    return None, "no_local_source_found"
+    return None, "no_local_source_found", {}
 
 
 # =============================================================================
@@ -504,6 +647,21 @@ def estimate_tokens_and_cost(fp: Dict[str, Any], requirements: List[Requirement]
         (total_output / 1_000_000.0) * GEMINI_35_FLASH_OUTPUT_PRICE_USD_PER_M
     )
 
+    # Compute costs for alternative models
+    alternative_costs = {}
+    for model_key, pricing in ALTERNATIVE_MODELS_PRICING.items():
+        alt_cost = (
+            (total_input / 1_000_000.0) * pricing["input_usd_per_m"] +
+            (total_output / 1_000_000.0) * pricing["output_usd_per_m"]
+        )
+        alternative_costs[model_key] = {
+            "model_name": pricing["name"],
+            "estimated_cost_usd": round(alt_cost, 4),
+            "input_usd_per_million": pricing["input_usd_per_m"],
+            "output_usd_per_million": pricing["output_usd_per_m"],
+            "notes": pricing["notes"]
+        }
+
     return {
         "model": MODEL_NAME,
         "total_estimated_input_tokens": total_input,
@@ -517,6 +675,7 @@ def estimate_tokens_and_cost(fp: Dict[str, Any], requirements: List[Requirement]
             "input_usd_per_million": GEMINI_35_FLASH_INPUT_PRICE_USD_PER_M,
             "output_usd_per_million": GEMINI_35_FLASH_OUTPUT_PRICE_USD_PER_M,
         },
+        "alternative_models": alternative_costs,
         "overhead_tokens": {"input": overhead_in, "output": overhead_out},
     }
 
@@ -635,7 +794,8 @@ def validate_against_target(target_dir: str, fp: Dict[str, Any]) -> Dict[str, An
 
 def write_reports(result: EstimationResult, prompt_id: str) -> Tuple[Path, Path]:
     """Write both the human-readable .md and the machine .json reports."""
-    out_dir = Path("reports") / prompt_id
+    base = Path(os.environ.get("SENTINEL_REPORTS_DIR", "reports"))
+    out_dir = base / prompt_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
     md_path = out_dir / "scientific_estimation.md"
@@ -663,6 +823,16 @@ def write_reports(result: EstimationResult, prompt_id: str) -> Tuple[Path, Path]
               f"(in: {tok['total_estimated_input_tokens']:,} / out: {tok['total_estimated_output_tokens']:,})\n")
     md.append(f"- **Estimated Cost (Gemini 3.5 Flash):** ${tok['estimated_total_cost_usd']}\n")
     md.append(f"- **Optimization Savings Opportunity:** {result.optimization_plan.get('estimated_savings_percent', 'N/A')}\n")
+
+    # Multi-model recommendations
+    if "alternative_models" in tok:
+        md.append("\n## Model Recommendations & Cost Comparison\n")
+        md.append("| Model | Est. Cost (USD) | Notes |\n")
+        md.append("|-------|------------------|-------|\n")
+        md.append(f"| **Gemini 3.5 Flash** (current) | ${tok['estimated_total_cost_usd']} | Best price/performance for most work |\n")
+        for model_key, alt in tok["alternative_models"].items():
+            md.append(f"| {alt['model_name']} | ${alt['estimated_cost_usd']} | {alt['notes']} |\n")
+        md.append("\n**Recommendation:** Use Gemini 3.5 Flash as default. Route only the hardest reasoning steps to Grok 4 Reasoning or Claude 4.\n")
     md.append("")
 
     # FP breakdown table
@@ -717,6 +887,8 @@ def main():
     parser = argparse.ArgumentParser(description="PRISM Scientific AI Development Estimator")
     parser.add_argument("prompt_id", help="Vertex AI Saved Prompt ID (e.g. 3381323161097207808)")
     parser.add_argument("target_dir", help="Path to project to validate against (e.g. ../coder)")
+    parser.add_argument("--num-users", type=int, default=1, help="Expected number of users / teams using this (for cost per user)")
+    parser.add_argument("--monthly-budget-usd", type=float, default=0.0, help="Allocated monthly AI budget in USD")
     args = parser.parse_args()
 
     run_uuid = str(uuid.uuid4())
@@ -732,7 +904,9 @@ def main():
     print()
 
     # STEP 1
-    content, provenance = load_authoritative_content(args.prompt_id)
+    content, provenance, source_metadata = load_authoritative_content(args.prompt_id)
+    source_type = source_metadata.get("source_type", "unknown")
+    source_quality = source_metadata.get("source_quality_score", 0.0)
 
     # STEP 2
     requirements = extract_atomic_requirements(content)
@@ -756,12 +930,17 @@ def main():
         model=MODEL_NAME,
         generated_at=started,
         source_provenance=provenance,
+        source_type=source_type,
+        source_quality_score=source_quality,
         requirements=[asdict(r) for r in requirements],
         functional_points=fp,
         token_estimate=token_est,
         optimization_plan=opt_plan,
         validation=validation,
         raw_prompt_excerpt=content[:2200],
+        # New: users & budget context
+        num_users=args.num_users,
+        monthly_budget_usd=args.monthly_budget_usd,
     )
 
     # Write outputs
@@ -774,6 +953,8 @@ def main():
     print("=" * 72)
     print(f"Estimation Run UUID : {run_uuid}")
     print(f"Source Provenance   : {provenance}")
+    print(f"Source Type         : {source_type}")
+    print(f"Source Quality      : {source_quality:.0%} confidence")
     print()
     print(f"High-Signal Requirements : {fp['requirement_count']}")
     print(f"Total Functional Points  : {fp['total_functional_points']}   (band: {fp['complexity_band']})")
@@ -783,6 +964,26 @@ def main():
     print(f"Estimated Total Tokens   : {token_est['estimated_total_tokens']:,}")
     print(f"Estimated Cost (USD)     : ${token_est['estimated_total_cost_usd']}")
     print(f"Iteration Multiplier     : {token_est['iteration_multiplier_applied']}x  (band: {fp['complexity_band']})")
+    print()
+
+    # Users + Budget context
+    if args.num_users > 0:
+        cost_per_user = token_est['estimated_total_cost_usd'] / args.num_users
+        print(f"Users / Teams            : {args.num_users}")
+        print(f"Cost per User            : ${cost_per_user:.4f}")
+        if args.monthly_budget_usd > 0:
+            budget_used = (token_est['estimated_total_cost_usd'] / args.monthly_budget_usd) * 100
+            print(f"Monthly Budget           : ${args.monthly_budget_usd:,.2f}")
+            print(f"Budget Utilization       : {budget_used:.1f}%")
+
+    # Model recommendations (console)
+    if "alternative_models" in token_est:
+        print()
+        print("Model Recommendations (same token volume):")
+        print(f"  Gemini 3.5 Flash (current): ${token_est['estimated_total_cost_usd']:.4f}")
+        for m in token_est["alternative_models"].values():
+            print(f"  {m['model_name']}: ${m['estimated_cost_usd']:.4f}  — {m['notes']}")
+        print("  → Recommendation: Use Gemini 3.5 Flash as default. Escalate hardest steps to Grok 4 Reasoning.")
     print()
     v = validation
     print(f"Actual Python LOC (clean): {v.get('meaningful_python_loc', 'N/A'):,}")

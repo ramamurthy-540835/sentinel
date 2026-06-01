@@ -1,31 +1,112 @@
-# PRISM Sentinel Quality Agent
+# PRISM Sentinel
 
-PRISM Sentinel is an enterprise quality assurance, requirements traceability, and audit evidence agent. It is designed to verify and assure target projects without modifying their code.
+PRISM Sentinel is a set of Python-based tools for **scientific AI development estimation**, requirements intelligence, and quality auditing of target projects.
 
-## Features
+It is designed to provide objective, traceable analysis without modifying the code under review.
 
-- **Requirements Traceability**: Maps requirements from `requirements/` to implementation evidence in target projects.
-- **Gap Analysis**: Compares requirements vs files delivered, flagging missing implementations, tests, docs, or configs.
-- **Code Quality Review**: Runs static checks (Python compilation, Bash syntax, SQL best practices, forbidden model policy, and secret scanning).
-- **Environment Validation**: Validates `.env.local` and `models.json` without printing secrets.
-- **GCS Layout Audit**: Audits GCS bucket references and Medallion architecture layouts.
-- **Audit Evidence Packaging**: Combines all reports into a single comprehensive audit package.
+---
 
-## Usage
+## Getting Started
 
-To run all audits against a target project:
+The easiest way to see what’s available is to run:
 
 ```bash
-./scripts/run_sentinel_all.sh /home/appadmin/projects/Ram_Projects/DiracDelta/gcloud_run
+./start.sh
 ```
 
-## Output Reports
+This script performs environment checks (ADC, GCP project) and prints the key workflows you can run.
 
-All reports are generated under the `reports/` directory:
-- `reports/requirements_traceability.md`
-- `reports/requirements_traceability.json`
-- `reports/gap_analysis.md`
-- `reports/code_quality_report.md`
-- `reports/environment_validation.md`
-- `reports/gcs_audit.md`
-- `reports/audit_evidence_package.md`
+---
+
+## Main Capabilities
+
+### 1. Scientific AI Development Estimation (Primary Focus)
+
+This is the recommended workflow for understanding the effort, cost, and complexity of implementing a given Vertex AI Saved Prompt.
+
+**Recommended flow for prompt `3381323161097207808`:**
+
+```bash
+# Step 1: Clean and classify the raw prompt (removes noise using deterministic + BQML rules)
+./scripts/run_requirement_scope_extraction.sh 3381323161097207808
+
+# Step 2: Run the scientific estimator (Gemini 3.5 Flash only)
+./scripts/run_ai_development_estimator.sh 3381323161097207808 ../coder
+```
+
+**What it produces:**
+
+- Clean requirement scope (`requirement_scope_clean.md`)
+- Full scientific estimation report:
+  - `reports/3381323161097207808/scientific_estimation.md`
+  - `reports/3381323161097207808/scientific_estimation.json`
+
+The estimator performs:
+- Deterministic atomic requirement extraction
+- Complexity classification (Simple / Medium / Complex)
+- Functional Point calculation using fixed weights (Simple=3, Medium=5, Complex=8)
+- Token & cost estimation using **only Gemini 3.5 Flash**
+- Validation against actual code in the target directory (`../coder`)
+
+---
+
+### 2. Full Quality & Compliance Auditing
+
+PRISM Sentinel can also run a complete quality audit against a target codebase.
+
+```bash
+# Run the full audit suite
+./scripts/run_sentinel_all.sh ../coder --prompt-id 3381323161097207808 --write-bq
+```
+
+Individual audit steps are also available:
+- `./scripts/run_requirement_mapping.sh`
+- `./scripts/run_gap_analysis.sh`
+- `./scripts/run_code_quality.sh`
+- `./scripts/run_env_validation.sh`
+- `./scripts/run_gcs_audit.sh`
+
+**Audit reports** are written under `reports/`.
+
+---
+
+## Key Scripts
+
+| Script                                      | Purpose                                      |
+|---------------------------------------------|----------------------------------------------|
+| `run_requirement_scope_extraction.sh`       | Clean & classify raw prompt (BQML + rules)   |
+| `run_ai_development_estimator.sh`           | Scientific token/cost estimation             |
+| `run_sentinel_all.sh`                       | Run complete quality audit suite             |
+| `run_requirement_mapping.sh`                | Map requirements to code evidence            |
+| `run_gap_analysis.sh`                       | Identify missing implementations             |
+| `run_code_quality.sh`                       | Static analysis + policy checks              |
+
+---
+
+## Output Locations
+
+- Estimation reports: `reports/<prompt_id>/scientific_estimation.{md,json}`
+- Cleaned scope: `reports/<prompt_id>/requirement_scope_clean.md`
+- All audit reports: `reports/`
+
+---
+
+## Project Focus
+
+This directory (`sentinel/`) is the current primary home for:
+
+- Scientific AI development estimation
+- Prompt requirement intelligence
+- Independent quality auditing
+
+It is intentionally separate from other sub-projects in this workspace.
+
+---
+
+## Notes
+
+- Most tools support the `--write-bq` flag to persist results to BigQuery.
+- The tools prefer clean scope from the Requirement Intelligence layer when available.
+- All estimation uses **Gemini 3.5 Flash only** (no other models).
+
+For the most up-to-date commands, always run `./start.sh` first.

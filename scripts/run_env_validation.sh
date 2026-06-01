@@ -1,4 +1,8 @@
 #!/bin/bash
 set -e
 TARGET_PROJECT=${1:-/home/appadmin/projects/Ram_Projects/DiracDelta/gcloud_run}
+
+REPORTS_DIR="${SENTINEL_REPORTS_DIR:-reports}"
+export SENTINEL_REPORTS_DIR="$REPORTS_DIR"
+
 python3 agents/env_validator.py --target-project "$TARGET_PROJECT"

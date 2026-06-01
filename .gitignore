@@ -11,3 +11,15 @@ prompt_v6_*
 generated_code_output.md
 reports/
 *.log
+
+# Environment files with secrets
+.env.local
+.env
+.env.*
+
+# Secrets and environment
+.env
+.env.*
+.env.local
+*.env
+secrets/

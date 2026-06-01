@@ -37,14 +37,30 @@ cd "$SENTINEL_ROOT"
 mkdir -p "reports/${PROMPT_ID}"
 
 # Execute the core Python implementation
+echo "[1/2] Running estimator..."
 python3 agents/ai_development_estimator.py "$PROMPT_ID" "$TARGET_DIR"
 
 EXIT_CODE=$?
 
+if [ $EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo "================================================================================"
+    echo "❌ Estimator exited with code $EXIT_CODE"
+    echo "================================================================================"
+    exit $EXIT_CODE
+fi
+
+# Persist results to BigQuery
+echo ""
+echo "[2/2] Persisting results to BigQuery..."
+python3 agents/persist_estimation_to_bigquery.py "$PROMPT_ID"
+
+PERSIST_EXIT=$?
+
 echo ""
 echo "================================================================================"
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "✅ Estimation complete."
+if [ $PERSIST_EXIT -eq 0 ]; then
+    echo "✅ Estimation complete and persisted."
     echo ""
     echo "Reports written to:"
     echo "  reports/${PROMPT_ID}/scientific_estimation.md"
@@ -53,8 +69,8 @@ if [ $EXIT_CODE -eq 0 ]; then
     echo "Key artifacts for prompt ${PROMPT_ID}:"
     ls -lh "reports/${PROMPT_ID}/scientific_estimation."* 2>/dev/null || true
 else
-    echo "❌ Estimator exited with code $EXIT_CODE"
+    echo "❌ BigQuery persistence exited with code $PERSIST_EXIT"
 fi
 echo "================================================================================"
 
-exit $EXIT_CODE
+exit $PERSIST_EXIT
