@@ -171,6 +171,69 @@ class SentinelHandler(BaseHTTPRequestHandler):
             self._send_json(result)
             return
 
+        # NEW: GET /api/approval-status — BigQuery source-of-truth approval state
+        if parsed.path == "/api/approval-status":
+            try:
+                query_params = parse_qs(parsed.query) if parsed.query else {}
+                uid = query_params.get("uid", [f"vertexai:{DEFAULT_PROMPT_ID}"])[0]
+                run_uuid = query_params.get("runUuid", [""])[0]
+                prompt_id = uid.replace("vertexai:", "").strip()
+                prompt_uid = uid if uid.startswith("vertexai:") else f"vertexai:{prompt_id}"
+
+                from google.cloud import bigquery
+                client = bigquery.Client(project="ctoteam")
+                if run_uuid:
+                    sql = """
+                        SELECT prompt_uid, prompt_id, estimation_run_uuid, approved, approved_at, approved_by, updated_at
+                        FROM `ctoteam.prism_prompt_catalog.prompt_approvals`
+                        WHERE prompt_uid = @prompt_uid AND estimation_run_uuid = @run_uuid
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                    """
+                    params = [
+                        bigquery.ScalarQueryParameter("prompt_uid", "STRING", prompt_uid),
+                        bigquery.ScalarQueryParameter("run_uuid", "STRING", run_uuid),
+                    ]
+                else:
+                    sql = """
+                        SELECT prompt_uid, prompt_id, estimation_run_uuid, approved, approved_at, approved_by, updated_at
+                        FROM `ctoteam.prism_prompt_catalog.prompt_approvals`
+                        WHERE prompt_uid = @prompt_uid
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                    """
+                    params = [
+                        bigquery.ScalarQueryParameter("prompt_uid", "STRING", prompt_uid),
+                    ]
+                job = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params))
+                rows = list(job.result())
+                if not rows:
+                    self._send_json({
+                        "promptUid": prompt_uid,
+                        "promptId": prompt_id,
+                        "approved": False,
+                        "source": "bigquery",
+                        "exists": False
+                    })
+                    return
+
+                r = rows[0]
+                self._send_json({
+                    "promptUid": r.prompt_uid,
+                    "promptId": r.prompt_id,
+                    "estimationRunUuid": r.estimation_run_uuid,
+                    "approved": bool(r.approved),
+                    "approvedAt": str(r.approved_at) if r.approved_at else None,
+                    "approvedBy": r.approved_by,
+                    "updatedAt": str(r.updated_at) if r.updated_at else None,
+                    "source": "bigquery",
+                    "exists": True
+                })
+                return
+            except Exception as e:
+                self._send_json({"error": str(e), "source": "bigquery"}, 500)
+                return
+
         # NEW: GET /api/report-data — structured data for the full Report tab (MUST come before the broader /api/report check)
         if parsed.path == "/api/report-data":
             try:
@@ -214,7 +277,7 @@ class SentinelHandler(BaseHTTPRequestHandler):
                 alt_models = tokens.get("alternative_models", {})
                 models = []
 
-                current_cost = tokens.get("estimated_cost_usd", 0) or 0
+                current_cost = tokens.get("estimated_total_cost_usd", tokens.get("estimated_cost_usd", 0)) or 0
                 models.append({
                     "model": "Gemini 3.5 Flash",
                     "cost_usd": current_cost,
@@ -259,7 +322,7 @@ class SentinelHandler(BaseHTTPRequestHandler):
                         "total": tokens.get("estimated_total_tokens", 0),
                         "input": tokens.get("estimated_input_tokens", 0),
                         "output": tokens.get("estimated_output_tokens", 0),
-                        "costUsd": tokens.get("estimated_cost_usd", 0),
+                        "costUsd": tokens.get("estimated_total_cost_usd", tokens.get("estimated_cost_usd", 0)),
                         "devHours": round(tokens.get("estimated_total_tokens", 0) / 10000, 1),
                     },
                     "modelComparison": models,
@@ -367,7 +430,7 @@ class SentinelHandler(BaseHTTPRequestHandler):
                 alt_models = tokens.get("alternative_models", {})
                 models = []
 
-                current_cost = tokens.get("estimated_cost_usd", 0) or 0
+                current_cost = tokens.get("estimated_total_cost_usd", tokens.get("estimated_cost_usd", 0)) or 0
                 models.append({
                     "model": "Gemini 3.5 Flash",
                     "cost_usd": current_cost,
@@ -412,7 +475,7 @@ class SentinelHandler(BaseHTTPRequestHandler):
                         "total": tokens.get("estimated_total_tokens", 0),
                         "input": tokens.get("estimated_input_tokens", 0),
                         "output": tokens.get("estimated_output_tokens", 0),
-                        "costUsd": tokens.get("estimated_cost_usd", 0),
+                        "costUsd": tokens.get("estimated_total_cost_usd", tokens.get("estimated_cost_usd", 0)),
                         "devHours": round(tokens.get("estimated_total_tokens", 0) / 10000, 1),
                     },
                     "modelComparison": models,
@@ -434,8 +497,9 @@ class SentinelHandler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(content_length).decode("utf-8")) if content_length else {}
 
                 uid = body.get("uid", DEFAULT_PROMPT_ID)
-                prompt_id = uid.replace("vertexai:", "").strip()
+                prompt_id = body.get("promptId", uid.replace("vertexai:", "").strip())
                 approved_by = body.get("approvedBy", "governance-ui")
+                run_uuid_from_body = body.get("runUuid", "")
 
                 candidates = [
                     os.path.join("reports", prompt_id, "scientific_estimation.json"),
@@ -451,9 +515,68 @@ class SentinelHandler(BaseHTTPRequestHandler):
                     est = json.load(f)
 
                 from datetime import datetime, timezone
+                approved_at = datetime.now(timezone.utc).isoformat()
                 est["approved"] = True
-                est["approved_at"] = datetime.now(timezone.utc).isoformat()
+                est["approved_at"] = approved_at
                 est["approved_by"] = approved_by
+
+                # BigQuery is source of truth for approvals.
+                # Fail the request if BQ write fails; only mirror to local JSON after success.
+                from google.cloud import bigquery
+                client = bigquery.Client(project="ctoteam")
+                prompt_uid = uid if uid.startswith("vertexai:") else f"vertexai:{prompt_id}"
+                run_uuid = run_uuid_from_body or est.get("estimation_run_uuid", "")
+
+                create_sql = """
+                    CREATE TABLE IF NOT EXISTS `ctoteam.prism_prompt_catalog.prompt_approvals` (
+                      prompt_uid STRING NOT NULL,
+                      prompt_id STRING NOT NULL,
+                      estimation_run_uuid STRING,
+                      approved BOOL NOT NULL,
+                      approved_at TIMESTAMP NOT NULL,
+                      approved_by STRING NOT NULL,
+                      updated_at TIMESTAMP NOT NULL
+                    )
+                    PARTITION BY DATE(updated_at)
+                    CLUSTER BY prompt_uid, prompt_id
+                """
+                client.query(create_sql).result()
+
+                merge_sql = """
+                    MERGE `ctoteam.prism_prompt_catalog.prompt_approvals` T
+                    USING (
+                      SELECT
+                        @prompt_uid AS prompt_uid,
+                        @prompt_id AS prompt_id,
+                        @estimation_run_uuid AS estimation_run_uuid,
+                        TRUE AS approved,
+                        @approved_at AS approved_at,
+                        @approved_by AS approved_by,
+                        CURRENT_TIMESTAMP() AS updated_at
+                    ) S
+                    ON T.prompt_uid = S.prompt_uid
+                    WHEN MATCHED THEN
+                      UPDATE SET
+                        prompt_id = S.prompt_id,
+                        estimation_run_uuid = S.estimation_run_uuid,
+                        approved = S.approved,
+                        approved_at = S.approved_at,
+                        approved_by = S.approved_by,
+                        updated_at = S.updated_at
+                    WHEN NOT MATCHED THEN
+                      INSERT (prompt_uid, prompt_id, estimation_run_uuid, approved, approved_at, approved_by, updated_at)
+                      VALUES (S.prompt_uid, S.prompt_id, S.estimation_run_uuid, S.approved, S.approved_at, S.approved_by, S.updated_at)
+                """
+                job_config = bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("prompt_uid", "STRING", prompt_uid),
+                        bigquery.ScalarQueryParameter("prompt_id", "STRING", prompt_id),
+                        bigquery.ScalarQueryParameter("estimation_run_uuid", "STRING", run_uuid),
+                        bigquery.ScalarQueryParameter("approved_at", "TIMESTAMP", approved_at),
+                        bigquery.ScalarQueryParameter("approved_by", "STRING", approved_by),
+                    ]
+                )
+                client.query(merge_sql, job_config=job_config).result()
 
                 with open(json_path, "w") as f:
                     json.dump(est, f, indent=2)
@@ -463,6 +586,7 @@ class SentinelHandler(BaseHTTPRequestHandler):
                     "promptId": prompt_id,
                     "approvedAt": est["approved_at"],
                     "approvedBy": approved_by,
+                    "bqTable": "ctoteam.prism_prompt_catalog.prompt_approvals",
                 })
                 return
 
@@ -501,6 +625,106 @@ class SentinelHandler(BaseHTTPRequestHandler):
             payload = json.loads(body) if body else {}
         except:
             payload = {}
+
+        if parsed.path == "/api/approve":
+            # BigQuery source-of-truth approval write
+            try:
+                uid = payload.get("uid", f"vertexai:{DEFAULT_PROMPT_ID}")
+                prompt_id = payload.get("promptId", uid.replace("vertexai:", "").strip())
+                approved_by = payload.get("approvedBy", "governance-ui")
+                run_uuid_from_body = payload.get("runUuid", "")
+
+                candidates = [
+                    os.path.join("reports", prompt_id, "scientific_estimation.json"),
+                    os.path.join("reports", prompt_id, prompt_id, "scientific_estimation.json"),
+                ]
+                json_path = next((p for p in candidates if os.path.exists(p)), None)
+
+                if not json_path:
+                    self._send_json({"error": "No report to approve"}, 404)
+                    return
+
+                with open(json_path) as f:
+                    est = json.load(f)
+
+                from datetime import datetime, timezone
+                approved_at = datetime.now(timezone.utc).isoformat()
+                est["approved"] = True
+                est["approved_at"] = approved_at
+                est["approved_by"] = approved_by
+
+                from google.cloud import bigquery
+                client = bigquery.Client(project="ctoteam")
+                prompt_uid = uid if uid.startswith("vertexai:") else f"vertexai:{prompt_id}"
+                run_uuid = run_uuid_from_body or est.get("estimation_run_uuid", "")
+
+                create_sql = """
+                    CREATE TABLE IF NOT EXISTS `ctoteam.prism_prompt_catalog.prompt_approvals` (
+                      prompt_uid STRING NOT NULL,
+                      prompt_id STRING NOT NULL,
+                      estimation_run_uuid STRING,
+                      approved BOOL NOT NULL,
+                      approved_at TIMESTAMP NOT NULL,
+                      approved_by STRING NOT NULL,
+                      updated_at TIMESTAMP NOT NULL
+                    )
+                    PARTITION BY DATE(updated_at)
+                    CLUSTER BY prompt_uid, prompt_id
+                """
+                client.query(create_sql).result()
+
+                merge_sql = """
+                    MERGE `ctoteam.prism_prompt_catalog.prompt_approvals` T
+                    USING (
+                      SELECT
+                        @prompt_uid AS prompt_uid,
+                        @prompt_id AS prompt_id,
+                        @estimation_run_uuid AS estimation_run_uuid,
+                        TRUE AS approved,
+                        @approved_at AS approved_at,
+                        @approved_by AS approved_by,
+                        CURRENT_TIMESTAMP() AS updated_at
+                    ) S
+                    ON T.prompt_uid = S.prompt_uid
+                    WHEN MATCHED THEN
+                      UPDATE SET
+                        prompt_id = S.prompt_id,
+                        estimation_run_uuid = S.estimation_run_uuid,
+                        approved = S.approved,
+                        approved_at = S.approved_at,
+                        approved_by = S.approved_by,
+                        updated_at = S.updated_at
+                    WHEN NOT MATCHED THEN
+                      INSERT (prompt_uid, prompt_id, estimation_run_uuid, approved, approved_at, approved_by, updated_at)
+                      VALUES (S.prompt_uid, S.prompt_id, S.estimation_run_uuid, S.approved, S.approved_at, S.approved_by, S.updated_at)
+                """
+                job_config = bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("prompt_uid", "STRING", prompt_uid),
+                        bigquery.ScalarQueryParameter("prompt_id", "STRING", prompt_id),
+                        bigquery.ScalarQueryParameter("estimation_run_uuid", "STRING", run_uuid),
+                        bigquery.ScalarQueryParameter("approved_at", "TIMESTAMP", approved_at),
+                        bigquery.ScalarQueryParameter("approved_by", "STRING", approved_by),
+                    ]
+                )
+                client.query(merge_sql, job_config=job_config).result()
+
+                with open(json_path, "w") as f:
+                    json.dump(est, f, indent=2)
+
+                self._send_json({
+                    "status": "approved",
+                    "promptId": prompt_id,
+                    "runUuid": run_uuid,
+                    "approvedAt": est["approved_at"],
+                    "approvedBy": approved_by,
+                    "bqTable": "ctoteam.prism_prompt_catalog.prompt_approvals",
+                })
+                return
+
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+                return
 
         if parsed.path == "/estimate":
             # Run the AI Development Estimator

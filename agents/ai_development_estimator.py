@@ -335,6 +335,31 @@ def _try_local_cleaned_scope(prompt_id: str) -> Tuple[Optional[str], str, dict]:
     return None, "local_cleaned_not_found", {}
 
 
+def _try_gcloud_run_silver_final_assembled(prompt_id: str) -> Tuple[Optional[str], str, dict]:
+    """Read latest local gcloud_run silver/final_assembled.md if available."""
+    runs_dir = Path(f"../gcloud_run/saved_prompts/{prompt_id}/runs")
+    if not runs_dir.exists():
+        return None, "gcloud_run_runs_not_found", {}
+
+    candidates = []
+    for run_dir in runs_dir.iterdir():
+        p = run_dir / "silver" / "final_assembled.md"
+        if p.exists() and p.stat().st_size > 2000:
+            candidates.append((p.stat().st_mtime, p))
+
+    if not candidates:
+        return None, "gcloud_run_silver_not_found", {}
+
+    candidates.sort(reverse=True)
+    best = candidates[0][1]
+    text = best.read_text(encoding="utf-8", errors="ignore")
+    return text, f"local:{best}", {
+        "source_type": "local_gcloud_run_silver",
+        "source_quality_score": 0.9,
+        "requirement_count": 0,
+    }
+
+
 def _try_gcs_final_assembled(prompt_id: str) -> Tuple[Optional[str], str, dict]:
     """Find the most recent high-quality final_assembled.md in silver/."""
     # List recent silver runs sorted by time
@@ -568,6 +593,11 @@ def extract_atomic_requirements(raw_text: str) -> List[Requirement]:
 
     print(f"  Extracted {len(requirements)} high-signal atomic requirements")
     return requirements
+
+
+def _requirements_suspiciously_thin(requirements: List[Requirement]) -> bool:
+    """Guardrail: extremely low requirement count usually means bad source selection."""
+    return len(requirements) < 8
 
 
 def calculate_functional_points(requirements: List[Requirement]) -> Dict[str, Any]:
@@ -910,6 +940,21 @@ def main():
 
     # STEP 2
     requirements = extract_atomic_requirements(content)
+
+    # Guardrail fallback: if cleaned scope is too thin, try richer local silver content.
+    if _requirements_suspiciously_thin(requirements):
+        print("  ⚠ Requirement count is suspiciously low; attempting richer local fallback source...")
+        fb_content, fb_prov, fb_meta = _try_gcloud_run_silver_final_assembled(args.prompt_id)
+        if fb_content:
+            fb_requirements = extract_atomic_requirements(fb_content)
+            if len(fb_requirements) > len(requirements):
+                print(f"  ✓ Fallback accepted: {len(fb_requirements)} requirements (was {len(requirements)})")
+                content = fb_content
+                provenance = fb_prov
+                source_type = fb_meta.get("source_type", source_type)
+                source_quality = fb_meta.get("source_quality_score", source_quality)
+                requirements = fb_requirements
+
     fp = calculate_functional_points(requirements)
 
     # STEP 3
