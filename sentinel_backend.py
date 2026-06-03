@@ -41,6 +41,16 @@ SAVED_PROMPT_ROOTS = [
 ]
 # ─────────────────────────────────────────────────────────────────────
 
+# Per-agent timeouts (seconds) — GCS/read agents need more time for large prompts
+AGENT_TIMEOUTS = {
+    'gcs_prompt_store':           180,
+    'read_saved_prompt':          180,
+    'read_saved_prompt_chunked':  120,
+    'read_saved_prompt_orchestrated': 300,
+    'bigquery_prompt_catalog':     60,
+    'evaluate_catalog_quality':    30,
+}
+
 # In-memory job store for async agent runs (FEATURE: Pipeline UI)
 AGENT_JOBS: dict = {}  # job_id → dict with status, stdout, etc.
 
@@ -702,6 +712,166 @@ class SentinelHandler(BaseHTTPRequestHandler):
                     "error": str(e),
                     "count": 1
                 })
+            return
+
+        # NEW: GET /api/bq-catalog-status using EXACT column names from schema
+        if parsed.path == "/api/bq-catalog-status":
+            try:
+                from google.cloud import bigquery
+                bq = bigquery.Client(project="ctoteam")
+
+                rows = list(bq.query("""
+                    SELECT
+                        v.prompt_uid,
+                        v.source_prompt_id,
+                        v.run_id,
+                        v.version_number,
+                        v.is_current,
+                        v.status,
+                        v.repeat_mode,
+                        v.chunk_count,
+                        v.system_present,
+                        v.user_message_count,
+                        v.model_message_count,
+                        v.text_attachment_count,
+                        v.raw_size_bytes,
+                        v.extracted_chars,
+                        v.raw_hash,
+                        v.silver_gcs_uri,
+                        v.gold_gcs_uri,
+                        v.valid_from,
+                        COALESCE(c.actual_chunks, 0)  AS chunks_in_bq,
+                        COALESCE(c.total_tokens, 0)   AS total_tokens
+                    FROM `ctoteam.prism_prompt_catalog.prompt_versions` v
+                    LEFT JOIN (
+                        SELECT prompt_uid,
+                               COUNT(chunk_id)       AS actual_chunks,
+                               SUM(estimated_tokens) AS total_tokens
+                        FROM `ctoteam.prism_prompt_catalog.prompt_chunks`
+                        GROUP BY prompt_uid
+                    ) c ON v.prompt_uid = c.prompt_uid
+                    WHERE v.is_current = TRUE
+                    ORDER BY v.valid_from DESC
+                """).result())
+
+                # Also get approvals
+                approvals = {}
+                try:
+                    for r in bq.query("""
+                        SELECT prompt_uid, approved, approved_at, approved_by
+                        FROM `ctoteam.prism_prompt_catalog.prompt_approvals`
+                        ORDER BY approved_at DESC
+                    """).result():
+                        pid = r['prompt_uid']
+                        if pid not in approvals:
+                            approvals[pid] = {
+                                'approved': r['approved'],
+                                'approvedAt': str(r['approved_at']),
+                                'approvedBy': r['approved_by'],
+                            }
+                except Exception:
+                    pass
+
+                catalog = []
+                for r in rows:
+                    d = dict(r)
+                    uid = d['prompt_uid']
+                    chunks_in_bq = d.get('chunks_in_bq') or 0
+                    has_real_hash = d.get('raw_hash','') not in ('', 'unknown', 'testhash123')
+                    has_messages  = (d.get('user_message_count') or 0) > 0
+                    has_real_gcs  = str(d.get('silver_gcs_uri','')).startswith('gs://agentproject')
+
+                    if chunks_in_bq > 0 and has_real_hash and has_messages:
+                        readiness = 'full'
+                    elif has_real_gcs and has_real_hash:
+                        readiness = 'partial'
+                    elif d.get('status') == 'success' and has_real_gcs:
+                        readiness = 'registered'
+                    else:
+                        readiness = 'incomplete'
+
+                    approval = approvals.get(uid, {})
+                    catalog.append({
+                        'promptUid':      uid,
+                        'promptId':       d['source_prompt_id'],
+                        'runId':          d['run_id'],
+                        'versionNumber':  d['version_number'],
+                        'status':         d['status'],
+                        'repeatMode':     d.get('repeat_mode',''),
+                        'chunkCount':     d.get('chunk_count', 0),
+                        'chunksInBQ':     chunks_in_bq,
+                        'totalTokens':    d.get('total_tokens', 0),
+                        'systemPresent':  d.get('system_present', False),
+                        'userMessages':   d.get('user_message_count', 0),
+                        'modelMessages':  d.get('model_message_count', 0),
+                        'attachments':    d.get('text_attachment_count', 0),
+                        'rawSizeBytes':   d.get('raw_size_bytes', 0),
+                        'extractedChars': d.get('extracted_chars', 0),
+                        'rawHash':        d.get('raw_hash',''),
+                        'silverGcs':      d.get('silver_gcs_uri',''),
+                        'goldGcs':        d.get('gold_gcs_uri',''),
+                        'validFrom':      str(d['valid_from']),
+                        'readiness':      readiness,
+                        'approved':       approval.get('approved', False),
+                        'approvedBy':     approval.get('approvedBy',''),
+                        'approvedAt':     approval.get('approvedAt',''),
+                    })
+
+                self._send_json({
+                    'catalog':          catalog,
+                    'total':            len(catalog),
+                    'source':           'bigquery',
+                    'ready_for_coding': [r['promptId'] for r in catalog if r['readiness'] == 'full'],
+                })
+
+            except Exception as e:
+                self._send_json({'error': str(e), 'source': 'bq_error'}, 500)
+            return
+
+        # NEW: GET /api/scan-summary — returns last run of vertex_prompt_scanner.py (for UI polling)
+        if parsed.path == "/api/scan-summary":
+            _sentinel_root = os.environ.get("SENTINEL_ROOT", os.path.dirname(os.path.abspath(__file__)))
+            summary_path = os.path.join(_sentinel_root, "reports", "vertex_scan_summary.json")
+            if os.path.exists(summary_path):
+                try:
+                    with open(summary_path) as f:
+                        self._send_json(json.load(f))
+                except Exception as e:
+                    self._send_json({"newCount": 0, "newPrompts": [], "scannedAt": "error", "error": str(e)})
+            else:
+                self._send_json({"newCount": 0, "newPrompts": [], "scannedAt": "never"})
+            return
+
+        # NEW: GET /api/scan-vertex-prompts — trigger the scanner (used by "🔍 Scan" button)
+        # ?auto=true or no flag: run full (will pipeline new ones)
+        # ?scan-only=1 : just report
+        if parsed.path == "/api/scan-vertex-prompts":
+            query_params = parse_qs(parsed.query) if parsed.query else {}
+            scan_only = query_params.get('scan-only', [None])[0] or query_params.get('scan_only', [None])[0]
+            _sentinel_root = os.environ.get("SENTINEL_ROOT", os.path.dirname(os.path.abspath(__file__)))
+            cmd = ["python3", "agents/vertex_prompt_scanner.py"]
+            if scan_only:
+                cmd.append("--scan-only")
+            # default (no flag) will run pipelines for new; use --dry-run if you want preview only
+            # for button with ?auto=true we run the real thing (it will log and update summary)
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=_sentinel_root,
+                    capture_output=True, text=True, timeout=300
+                )
+                # After run, return the latest summary if present
+                summary_path = os.path.join(_sentinel_root, "reports", "vertex_scan_summary.json")
+                if os.path.exists(summary_path):
+                    with open(summary_path) as f:
+                        summary = json.load(f)
+                    summary["scannerStdout"] = (result.stdout or "")[-2000:]
+                    summary["scannerStderr"] = (result.stderr or "")[-500:]
+                    self._send_json(summary)
+                else:
+                    self._send_json({"newCount": 0, "scannedAt": "just-ran", "stdout": result.stdout[-1000:]})
+            except Exception as e:
+                self._send_json({"error": str(e), "newCount": 0})
             return
 
         # Support GET for analytics and lineage aliases (as specified)
@@ -1492,6 +1662,18 @@ class SentinelHandler(BaseHTTPRequestHandler):
             ] + extra
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                if result.returncode == 2:
+                    self._send_json({
+                        "status": "preflight_failed",
+                        "error": "Insufficient prompt data",
+                        "message": "Run the pipeline agents first to extract prompt content",
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                        "prompt_id": prompt_id,
+                        "dry_run": dry_run
+                    }, 422)
+                    return
+
                 self._send_json({
                     "status": "success" if result.returncode == 0 else "error",
                     "stdout": result.stdout,
@@ -1591,9 +1773,10 @@ class SentinelHandler(BaseHTTPRequestHandler):
                     if agent_name == "bigquery_prompt_catalog":
                         extra_args = ["--run-id", str(uuid.uuid4())[:8]]
 
+                    timeout = AGENT_TIMEOUTS.get(agent_name, 90)
                     result = subprocess.run(
                         ["python3", agent_path, "--prompt-id", prompt_id] + extra_args,
-                        capture_output=True, text=True, timeout=120,
+                        capture_output=True, text=True, timeout=timeout,
                         cwd=GCLOUD_RUN_PATH
                     )
                     if result.returncode == 0:
@@ -1608,8 +1791,9 @@ class SentinelHandler(BaseHTTPRequestHandler):
                         "endTime":  time.time(),
                     })
                 except subprocess.TimeoutExpired:
+                    timeout = AGENT_TIMEOUTS.get(agent_name, 90)
                     AGENT_JOBS[job_id].update({
-                        "status": "failed", "stderr": "Timed out after 120s",
+                        "status": "failed", "stderr": f"Timed out after {timeout}s",
                         "endTime": time.time()
                     })
                 except Exception as e:
@@ -1620,6 +1804,76 @@ class SentinelHandler(BaseHTTPRequestHandler):
 
             threading.Thread(target=run_in_thread, daemon=True).start()
             self._send_json({"jobId": job_id, "status": "running", "agent": agent_name})
+            return
+
+        # FIX: NEW Coding Agent endpoint — BigQuery-first code generation
+        if parsed.path == "/api/run-coding-agent":
+            prompt_uid = payload.get("prompt_uid", payload.get("promptUid", f"vertexai:{DEFAULT_PROMPT_ID}"))
+            model_id = payload.get("model_id", payload.get("modelId", "gemini-3.5-flash"))
+
+            if not prompt_uid:
+                self._send_json({"error": "prompt_uid required"}, 400)
+                return
+
+            # Pre-flight: validate ADC before execution
+            auth = check_adc()
+            if not auth["ok"]:
+                cli = auth.get("cli", {})
+                adc = auth.get("adc", {})
+                fix_cmd = auth.get("fix") or "gcloud auth login && gcloud auth application-default login"
+                self._send_json({
+                    "status": "auth_error",
+                    "error": "GCP authentication required",
+                    "cli": cli,
+                    "adc": adc,
+                    "fix": fix_cmd
+                }, 401)
+                return
+
+            # Run coding agent
+            coder_agent_path = os.path.join(CODER_PATH, "agents", "coding_agent.py")
+            if not os.path.exists(coder_agent_path):
+                self._send_json({
+                    "error": f"Coding agent not found at {coder_agent_path}"
+                }, 404)
+                return
+
+            try:
+                result = subprocess.run(
+                    ["python3", coder_agent_path, prompt_uid, model_id],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    cwd=CODER_PATH
+                )
+
+                # Parse agent output
+                try:
+                    output = json.loads(result.stdout)
+                except:
+                    output = {
+                        "status": "error",
+                        "message": "Invalid JSON output from agent",
+                        "stdout": result.stdout,
+                        "stderr": result.stderr
+                    }
+
+                # Determine HTTP status
+                if result.returncode == 0:
+                    self._send_json(output, 200)
+                else:
+                    self._send_json(output, 500)
+
+            except subprocess.TimeoutExpired:
+                self._send_json({
+                    "status": "error",
+                    "message": "Coding agent timed out after 300s"
+                }, 500)
+            except Exception as e:
+                self._send_json({
+                    "status": "error",
+                    "message": str(e)
+                }, 500)
             return
 
         # /api/agents/* handlers (adapted to stdlib server to fulfill user's test commands)
@@ -1706,5 +1960,5 @@ if __name__ == "__main__":
     server = HTTPServer(("0.0.0.0", PORT), SentinelHandler)
     print(f"🚀 PRISM Sentinel Backend running on http://0.0.0.0:{PORT}")
     print(f"   Default Prompt: {DEFAULT_PROMPT_ID}")
-    print(f"   Endpoints: /health, /api/status, /api/prompts, /scope, /estimate, /api/adc-status, /api/gcloud-agents, /api/run-gcloud-agent, /api/agent-jobs, /api/agents/security (POST), /api/agents/analytics, /api/agents/lineage")
+    print(f"   Endpoints: /health, /api/status, /api/prompts, /scope, /estimate, /api/adc-status, /api/gcloud-agents, /api/run-gcloud-agent, /api/agent-jobs, /api/bq-catalog-status, /api/scan-summary, /api/scan-vertex-prompts, /api/agents/security (POST), /api/agents/analytics, /api/agents/lineage")
     server.serve_forever()

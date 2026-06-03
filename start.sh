@@ -226,10 +226,11 @@ except: pass
   (
     cd "$PROJECT_ROOT/sentinel" || exit 1
     BACKEND_PORT="$BACKEND_PORT" HOST_IP="$HOST_IP" \
-      python3 -u sentinel_backend.py \
+      nohup python3 -u sentinel_backend.py \
       > /tmp/sentinel_backend.log 2>&1 &
     echo $! > /tmp/sentinel_backend.pid
   ) 2>> "$start_log" || true
+  disown 2>/dev/null || true
 
   echo -n "  Waiting for backend (max 25s) "
   local be_ok=false
