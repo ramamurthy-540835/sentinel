@@ -84,6 +84,32 @@ ITERATION_MULTIPLIERS = {
 }
 
 # =============================================================================
+# IFPUG FP TYPE + PHASE TOKEN SPLIT (for advanced breakdown dashboard)
+# =============================================================================
+# These map IFPUG function types to AI development work and token cost profiles.
+# Used to split the total token estimate into explainable phases.
+FP_TYPE_RULES = {
+    # Keywords → (ifpug_type, phase, token_weight_multiplier)
+    "input|ingest|receive|accept|upload|submit|send": ("EI", "requirements", 0.8),
+    "output|generate|produce|export|report|display|render": ("EO", "code_generation", 1.2),
+    "query|search|retrieve|fetch|lookup|find|get": ("EQ", "code_generation", 1.0),
+    "store|save|persist|database|table|schema|model|bigquery|bq": ("ILF", "design", 1.0),
+    "integrate|api|gcs|vertex|external|cloud|service|endpoint": ("EIF", "design", 1.3),
+    "security|auth|encrypt|validate|verify|audit|compliance": ("EI", "review", 1.1),
+    "orchestrat|workflow|pipeline|schedule|trigger|agent": ("EO", "architecture", 1.2),
+}
+
+PHASE_TOKEN_RATIOS = {
+    "requirements":   0.08,
+    "design":         0.12,
+    "architecture":   0.12,
+    "code_generation":0.45,
+    "review":         0.20,
+    "documentation":  0.10,
+    "testing":        0.05,
+}
+
+# =============================================================================
 # TOKEN ESTIMATION MODEL (transparent, calibrated heuristics)
 # =============================================================================
 # These base numbers are derived from:
@@ -114,6 +140,8 @@ class Requirement:
     fp_weight: int = 5
     rationale: str = ""          # why this complexity was chosen
     expected_artifacts: List[str] = field(default_factory=list)
+    ifpug_type: str = ""         # EI/EO/EQ/ILF/EIF for advanced breakdown
+    phase: str = ""              # development phase for token split
 
     @property
     def req_id(self) -> str:
@@ -140,6 +168,10 @@ class EstimationResult:
     # New: User & Budget context for cost allocation
     num_users: int = 1
     monthly_budget_usd: float = 0.0
+
+    # Advanced FP + Phase breakdown (for dashboard)
+    fp_breakdown: Dict[str, Any] = field(default_factory=dict)
+    phase_breakdown: Dict[str, Any] = field(default_factory=dict)
 
 
 def run_command(cmd: List[str], timeout: int = 60) -> Tuple[int, str, str]:
@@ -494,6 +526,16 @@ def _classify_category(text: str) -> str:
     return "backend"
 
 
+def classify_requirement_fp_type(req_text: str) -> tuple:
+    """Returns (ifpug_type, phase, multiplier) for advanced FP/token breakdown."""
+    import re
+    text_lower = req_text.lower()
+    for pattern, result in FP_TYPE_RULES.items():
+        if re.search(pattern, text_lower):
+            return result
+    return ("EI", "code_generation", 1.0)  # default
+
+
 def _score_complexity(text: str) -> Tuple[str, str]:
     """
     Deterministic complexity scoring with explicit rationale.
@@ -571,6 +613,7 @@ def extract_atomic_requirements(raw_text: str) -> List[Requirement]:
             complexity, rationale = _score_complexity(line)
             weight = FP_WEIGHTS[complexity]
             category = _classify_category(line)
+            ifpug_type, phase, _mult = classify_requirement_fp_type(line)
 
             req = Requirement(
                 short_id=f"REQ-{req_num:03d}",
@@ -579,6 +622,8 @@ def extract_atomic_requirements(raw_text: str) -> List[Requirement]:
                 complexity=complexity,
                 fp_weight=weight,
                 rationale=rationale,
+                ifpug_type=ifpug_type,
+                phase=phase,
             )
             requirements.append(req)
             req_num += 1
@@ -601,15 +646,37 @@ def _requirements_suspiciously_thin(requirements: List[Requirement]) -> bool:
 
 
 def calculate_functional_points(requirements: List[Requirement]) -> Dict[str, Any]:
-    """Pure deterministic FP calculation. No LLM involvement."""
+    """Pure deterministic FP calculation. No LLM involvement.
+    Now also computes IFPUG type breakdown and high-level category for dashboard.
+    """
     counts = {"Simple": 0, "Medium": 0, "Complex": 0}
-    by_category: Dict[str, int] = {}
+    by_category: Dict[str, int] = {}  # legacy: backend/security/etc
+
+    fp_by_type: Dict[str, int] = {"EI": 0, "EO": 0, "EQ": 0, "ILF": 0, "EIF": 0}
+    fp_by_category: Dict[str, int] = {"functional": 0, "infrastructure": 0, "data": 0,
+                                      "security": 0, "orchestration": 0}
 
     total_fp = 0
     for r in requirements:
         counts[r.complexity] += 1
         total_fp += r.fp_weight
         by_category[r.category] = by_category.get(r.category, 0) + r.fp_weight
+
+        # New IFPUG + mapped category
+        ifpug = getattr(r, 'ifpug_type', '') or 'EI'
+        fp_by_type[ifpug] = fp_by_type.get(ifpug, 0) + r.fp_weight
+
+        # simple mapping (feature spec)
+        cat_map = {"EI": "functional", "EO": "functional", "EQ": "functional",
+                   "ILF": "data", "EIF": "infrastructure"}
+        mapped = cat_map.get(ifpug, "functional")
+        fp_by_category[mapped] = fp_by_category.get(mapped, 0) + r.fp_weight
+
+        # also fold security/orchestration from legacy category if present
+        if r.category == "security":
+            fp_by_category["security"] = fp_by_category.get("security", 0) + r.fp_weight
+        if r.category == "orchestration":
+            fp_by_category["orchestration"] = fp_by_category.get("orchestration", 0) + r.fp_weight
 
     if total_fp < 25:
         band = "Small"
@@ -624,6 +691,9 @@ def calculate_functional_points(requirements: List[Requirement]) -> Dict[str, An
         "counts_by_complexity": counts,
         "points_by_category": by_category,
         "requirement_count": len(requirements),
+        # New for dashboard
+        "by_ifpug_type": fp_by_type,
+        "by_category": fp_by_category,
     }
 
 
@@ -919,6 +989,8 @@ def main():
     parser.add_argument("target_dir", help="Path to project to validate against (e.g. ../coder)")
     parser.add_argument("--num-users", type=int, default=1, help="Expected number of users / teams using this (for cost per user)")
     parser.add_argument("--monthly-budget-usd", type=float, default=0.0, help="Allocated monthly AI budget in USD")
+    parser.add_argument('--dry-run', action='store_true',
+        help='Run estimation without writing any output files or BQ records')
     args = parser.parse_args()
 
     run_uuid = str(uuid.uuid4())
@@ -960,6 +1032,20 @@ def main():
     # STEP 3
     token_est = estimate_tokens_and_cost(fp, requirements)
 
+    # FEATURE 1: Build phase token/cost breakdown + ensure fp has the ifpug breakdowns
+    total_tokens = token_est.get("estimated_total_tokens", 0)
+    total_cost = token_est.get("estimated_total_cost_usd", 0.0)
+    cost_per_token = (total_cost / total_tokens) if total_tokens > 0 else 0.0
+
+    phase_token_breakdown = {
+        phase: round(total_tokens * ratio)
+        for phase, ratio in PHASE_TOKEN_RATIOS.items()
+    }
+    phase_cost_breakdown = {
+        phase: round(tokens * cost_per_token, 4)
+        for phase, tokens in phase_token_breakdown.items()
+    }
+
     # STEP 4
     opt_plan = generate_optimization_plan(fp, requirements)
 
@@ -986,7 +1072,35 @@ def main():
         # New: users & budget context
         num_users=args.num_users,
         monthly_budget_usd=args.monthly_budget_usd,
+        # Advanced breakdowns (FEATURE 1)
+        fp_breakdown={
+            "by_ifpug_type": fp.get("by_ifpug_type", {}),
+            "by_category": fp.get("by_category", {}),
+        },
+        phase_breakdown={
+            phase: {
+                "tokens": phase_token_breakdown.get(phase, 0),
+                "cost_usd": phase_cost_breakdown.get(phase, 0.0),
+                "pct": round(PHASE_TOKEN_RATIOS.get(phase, 0) * 100, 0)
+            }
+            for phase in PHASE_TOKEN_RATIOS
+        },
     )
+
+    if args.dry_run:
+        total_fp = fp.get("total_functional_points", 0)
+        complexity_band = fp.get("complexity_band", "Unknown")
+        total_tokens = token_est.get("estimated_total_tokens", 0)
+        cost_usd = token_est.get("estimated_total_cost_usd", 0.0)
+        dev_hours = round(total_tokens / 10000, 1) if total_tokens else 0
+        print("\n[DRY RUN] Estimation complete. No files written.")
+        print(f"  FP: {total_fp} ({complexity_band})")
+        print(f"  Tokens: {total_tokens:,}")
+        print(f"  Cost: ${cost_usd:.4f}")
+        print(f"  Dev Hours: {dev_hours:.1f}")
+        print(f"  High-Signal Reqs: {len(requirements)}")
+        print(f"  Run UUID: {run_uuid}")
+        sys.exit(0)
 
     # Write outputs
     md_path, json_path = write_reports(result, args.prompt_id)

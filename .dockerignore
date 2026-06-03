@@ -1,0 +1,10 @@
+.venv*
+venv/
+logs/
+reports/
+saved_prompts/
+__pycache__/
+*.pyc
+.env*
+secrets/
+.git/
