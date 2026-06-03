@@ -23,3 +23,28 @@ reports/
 .env.local
 *.env
 secrets/
+
+# Environment & secrets
+.env.local
+.env*.local
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Logs
+/tmp/
+*.log
+
+# Reports (large generated files)
+reports/*/
+
+# Virtual environments
+venv/
+.venv/
+
+# OS files
+.DS_Store
